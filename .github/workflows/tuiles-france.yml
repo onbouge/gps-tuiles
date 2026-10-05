@@ -64,7 +64,8 @@ jobs:
 
       - name: Vérifier par de vrais calculs (pas par /status)
         run: |
-          rm -f /mnt/cf/france-latest.osm.pbf
+          # le conteneur a repris /mnt/cf (root, 775) : sudo obligatoire
+          sudo rm -f /mnt/cf/france-latest.osm.pbf
           sudo rm -rf /mnt/cf/valhalla_tiles
           docker run -d --name vh -p 8002:8002 -v /mnt/cf:/custom_files \
             -e serve_tiles=True -e force_rebuild=False -e build_tar=False \
@@ -89,6 +90,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          sudo chmod 777 /mnt/cf
           cd /mnt/cf
           tag="france-$(date -u +%Y%m%d-%H%M)"
           split -b 1900M -d -a 2 valhalla_tiles.tar "valhalla_tiles.tar.part"
