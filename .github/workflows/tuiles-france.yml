@@ -1,0 +1,103 @@
+name: Tuiles France
+
+# Construit les tuiles de routage Valhalla de la France entière et les publie
+# en Release. Le VPS d'OnBouge les télécharge lui-même : il n'a pas la mémoire
+# pour l'étape « enhance » sur la France (tuée à 7 Go), une machine GitHub si.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 1 * * 6" # samedi 01:00 UTC
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tuiles-france
+  cancel-in-progress: false
+
+env:
+  # Même image, au condensat près, que le conteneur valhalla-hn du VPS :
+  # des tuiles d'une autre version pourraient ne pas être lues.
+  IMAGE: ghcr.io/gis-ops/docker-valhalla/valhalla@sha256:060da5b92e6024a67f65135c236d918b021d63e73d1808a0d55b7e7cbd17240c
+  PBF_URL: https://download.geofabrik.de/europe/france-latest.osm.pbf
+
+jobs:
+  construire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Faire de la place et ajouter du swap
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /mnt/swap-tuiles
+          sudo chmod 600 /mnt/swap-tuiles
+          sudo mkswap /mnt/swap-tuiles
+          sudo swapon /mnt/swap-tuiles
+          sudo mkdir -p /mnt/cf
+          sudo chmod 777 /mnt/cf
+          df -h / /mnt
+          free -g
+          nproc
+
+      - name: Télécharger la France (Geofabrik) et vérifier le MD5
+        run: |
+          curl -fL --retry 5 --retry-delay 30 -o /mnt/cf/france-latest.osm.pbf "$PBF_URL"
+          attendu=$(curl -fsL "$PBF_URL.md5" | awk '{print $1}')
+          obtenu=$(md5sum /mnt/cf/france-latest.osm.pbf | awk '{print $1}')
+          echo "md5 attendu=$attendu obtenu=$obtenu"
+          test -n "$attendu" && test "$attendu" = "$obtenu"
+          ls -la /mnt/cf
+
+      - name: Construire les tuiles
+        run: |
+          docker pull -q "$IMAGE"
+          /usr/bin/time -v docker run --rm \
+            -v /mnt/cf:/custom_files \
+            -e serve_tiles=False -e force_rebuild=True -e build_tar=True \
+            -e build_admins=False -e build_elevation=False -e build_time_zones=False \
+            -e use_tiles_ignore_pbf=True -e update_existing_config=True \
+            "$IMAGE"
+          ls -la /mnt/cf
+          test -s /mnt/cf/valhalla_tiles.tar
+
+      - name: Vérifier par de vrais calculs (pas par /status)
+        run: |
+          rm -f /mnt/cf/france-latest.osm.pbf
+          sudo rm -rf /mnt/cf/valhalla_tiles
+          docker run -d --name vh -p 8002:8002 -v /mnt/cf:/custom_files \
+            -e serve_tiles=True -e force_rebuild=False -e build_tar=False \
+            -e build_admins=False -e build_elevation=False -e build_time_zones=False \
+            -e use_tiles_ignore_pbf=True -e update_existing_config=True \
+            "$IMAGE"
+          for i in $(seq 1 60); do
+            curl -fs localhost:8002/status >/dev/null && break
+            sleep 10
+          done
+          route() {
+            curl -s -m 120 -X POST localhost:8002/route -d "{\"locations\":[{\"lat\":$1,\"lon\":$2,\"radius\":150},{\"lat\":$3,\"lon\":$4,\"radius\":150}],\"costing\":\"$5\"}" \
+              | jq -e '.trip.summary.length' || { echo "ECHEC $6"; docker logs --tail 50 vh; exit 1; }
+          }
+          echo "Evreux-Lyon";        route 49.024 1.151 45.764 4.835 auto   Evreux-Lyon
+          echo "Lille-Marseille";    route 50.629 3.057 43.296 5.370 auto   Lille-Marseille
+          echo "Nantes-Rennes";      route 47.218 -1.553 48.117 -1.677 auto Nantes-Rennes
+          echo "Brest-Strasbourg camion"; route 48.390 -4.486 48.573 7.752 truck Brest-Strasbourg
+          docker rm -f vh
+
+      - name: Publier en Release (morceaux < 2 Go + empreintes)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd /mnt/cf
+          tag="france-$(date -u +%Y%m%d-%H%M)"
+          split -b 1900M -d -a 2 valhalla_tiles.tar "valhalla_tiles.tar.part"
+          sha256sum valhalla_tiles.tar valhalla_tiles.tar.part* > SHA256SUMS
+          cat SHA256SUMS
+          gh release create "$tag" valhalla_tiles.tar.part* SHA256SUMS valhalla.json \
+            --repo "$GITHUB_REPOSITORY" --title "$tag" \
+            --notes "Tuiles Valhalla France entière, construites depuis Geofabrik france-latest. Données © contributeurs OpenStreetMap, licence ODbL."
+          # On garde les 2 dernières constructions
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json tagName,createdAt \
+            -q 'sort_by(.createdAt) | reverse | .[2:][] | .tagName' \
+            | xargs -r -n1 gh release delete --repo "$GITHUB_REPOSITORY" -y --cleanup-tag
