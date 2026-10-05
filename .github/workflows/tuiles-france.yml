@@ -43,7 +43,9 @@ jobs:
 
       - name: Télécharger la France (Geofabrik) et vérifier le MD5
         run: |
-          curl -fL --retry 5 --retry-delay 30 -o /mnt/cf/france-latest.osm.pbf "$PBF_URL"
+          # 05/10 : un telechargement a pendu > 1 h sans erreur -> on coupe sous 100 Ko/s pendant 2 min et on reprend
+          curl -fL --retry 8 --retry-delay 30 --retry-all-errors --speed-limit 100000 --speed-time 120 \
+            -C - -o /mnt/cf/france-latest.osm.pbf "$PBF_URL"
           attendu=$(curl -fsL "$PBF_URL.md5" | awk '{print $1}')
           obtenu=$(md5sum /mnt/cf/france-latest.osm.pbf | awk '{print $1}')
           echo "md5 attendu=$attendu obtenu=$obtenu"
