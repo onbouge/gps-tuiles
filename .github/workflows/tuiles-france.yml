@@ -62,21 +62,22 @@ jobs:
       - name: Fusionner en UN seul pbf (le build multi-pbf plante, règle du 27/07)
         run: |
           osmium merge /mnt/src/*.osm.pbf -o /mnt/cf/ouest.osm.pbf --overwrite
-          rm -rf /mnt/src
+          # /mnt appartient a root : TOUT effacement ici passe par sudo (paye 2 fois)
+          sudo rm -rf /mnt/src
           ls -la /mnt/cf
 
       - name: Construire les tuiles
         run: |
           # releve de memoire toutes les 30 s : si ca casse, on saura si c est la RAM
-          ( while true; do free -m | awk '/Mem|Swap/{printf "%s %s/%s  ", $1, $3, $2} END{print ""}'; sleep 30; done ) > /mnt/memoire.log 2>&1 &
+          ( while true; do free -m | awk '/Mem|Swap/{printf "%s %s/%s  ", $1, $3, $2} END{print ""}'; sleep 30; done ) > "$RUNNER_TEMP/memoire.log" 2>&1 &
           docker pull -q "$IMAGE"
           docker run --rm \
             -v /mnt/cf:/custom_files \
             -e serve_tiles=False -e force_rebuild=True -e build_tar=True \
             -e build_admins=False -e build_elevation=False -e build_time_zones=False \
             -e use_tiles_ignore_pbf=True -e update_existing_config=True \
-            "$IMAGE" || { echo "BUILD EN ECHEC"; tail -20 /mnt/memoire.log; exit 1; }
-          echo "Memoire en fin de build (extraits) :"; awk 'NR%20==0' /mnt/memoire.log | tail -15
+            "$IMAGE" || { echo "BUILD EN ECHEC"; tail -20 "$RUNNER_TEMP/memoire.log"; exit 1; }
+          echo "Memoire en fin de build (extraits) :"; awk 'NR%20==0' "$RUNNER_TEMP/memoire.log" | tail -15
           ls -la /mnt/cf
           test -s /mnt/cf/valhalla_tiles.tar
 
